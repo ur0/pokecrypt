@@ -1,0 +1,139 @@
+package crypto
+
+import (
+	"encoding/binary"
+	// "/api/unicorn"
+	"unicorn"
+	"fmt"
+	"log"
+	"io/ioutil"
+)
+
+const hashSeed uint32 = 0x61247FBF
+const codeAddr uint64 = 0x1000
+
+func unicornCodeHook(mu unicorn.Unicorn, addr uint64, size uint32) {}
+
+type NianticHash struct {
+	mu unicorn.Unicorn
+}
+
+func (nh *NianticHash) createMap(address uint64, size uint64) error {
+	chunk := address % 0x1000
+	taddr := address - chunk
+	tsize := ((0xFFF + chunk + size) / 0x1000) * 0x1000
+
+	err := nh.mu.MemMap(taddr, tsize)
+	if err != nil {
+		return fmt.Errorf("uc_mem_map(): %v", err)
+	}
+
+	return nil
+}
+
+func (nh *NianticHash) memMap(address uint64, buffer []byte) error {
+	err := nh.mu.MemWrite(address, buffer)
+
+	if err != nil {
+		return fmt.Errorf("uc_mem_write(): %v", err)
+	}
+
+	return nil
+}
+
+func NewNianticHash() (*NianticHash, error) {
+	mu, err := unicorn.NewUnicorn(unicorn.ARCH_ARM, unicorn.MODE_THUMB)
+	if err != nil {
+		return nil, fmt.Errorf("uc_open(): %v", err)
+	}
+
+	nh := &NianticHash{mu}
+
+	// Map heap and stack.
+	if err := nh.createMap(0xE0000000, 0x2000); err != nil {
+		return nil, err
+	}
+	if err := nh.createMap(0xD0000000, 0x2000); err != nil {
+		return nil, err
+	}
+	sp := 0xD0000000 + 0x1000
+	mu.RegWrite(unicorn.ARM_REG_SP, uint64(sp))
+
+	// Code segment with call to hash function.
+	nh.createMap(codeAddr, 0x1000)
+	nh.memMap(codeAddr, []byte{0x90, 0x47}) // BLX R2
+
+	mu.HookAdd(unicorn.HOOK_CODE, unicornCodeHook)
+
+	// iOS specific, pokemongo32 should be the first 0x02C9C5A0 bytes of the binary (32-bit area only)
+	buffer, err := ioutil.ReadFile("pokemongo32")
+	if err != nil {
+		return nil, fmt.Errorf("Could not read POGO binary: %v", err)
+	}
+
+	nh.createMap(0x0000B730, 0x02DCA128-0x0000B730)
+	nh.memMap(0x0000B730, buffer[0x0000B730:])
+	nh.memMap(0x01BE9D9E, []byte{0x00, 0x20})
+
+	exportaddr := 0x029AC000
+	for i := 0; i < 0xD58D; i++ {
+		value := binary.LittleEndian.Uint32(buffer[exportaddr+i*4:])
+
+		if value == 0 {
+			nh.memMap(uint64(exportaddr+(i*4)), []byte{0x50, 0xC6, 0xC9, 0x02})
+		}
+	}
+
+	log.Print("QEMU init successful.")
+
+	return nh, nil
+}
+
+func (nh *NianticHash) hash(buffer []byte) (uint64, error) {
+	nh.mu.RegWrite(unicorn.ARM_REG_R0, 0xE0001000)          // buffer
+	nh.mu.RegWrite(unicorn.ARM_REG_R1, uint64(len(buffer))) // size
+	nh.mu.RegWrite(unicorn.ARM_REG_R2, 0x01BE8290+1)        // hash function address
+
+	nh.memMap(0xE0001000, buffer)
+
+	if err := nh.mu.Start(codeAddr, codeAddr+2); err != nil {
+		return 0, fmt.Errorf("uc_emu_start(): %v", err)
+	}
+
+	r0, _ := nh.mu.RegRead(unicorn.ARM_REG_R0)
+	r1, _ := nh.mu.RegRead(unicorn.ARM_REG_R1)
+	return r1<<32 | r0&0xFFFFFFFF, nil
+}
+
+func (nh *NianticHash) Hash32(buffer []byte) (uint32, error) {
+	return nh.Hash32Salt(buffer, hashSeed)
+}
+
+func (nh *NianticHash) Hash32Salt(buffer []byte, salt uint32) (uint32, error) {
+	ret, err := nh.Hash64Salt(buffer, salt)
+	if err != nil {
+		return 0, err
+	}
+
+	return uint32(ret) ^ uint32(ret>>32), nil
+}
+
+func (nh *NianticHash) Hash64(buffer []byte) (uint64, error) {
+	return nh.Hash64Salt(buffer, hashSeed)
+}
+
+func (nh *NianticHash) Hash64Salt(buffer []byte, salt uint32) (uint64, error) {
+	newBuffer := make([]byte, len(buffer)+4)
+	binary.BigEndian.PutUint32(newBuffer, salt)
+	copy(newBuffer[4:], buffer)
+
+	return nh.hash(newBuffer)
+}
+
+func (nh *NianticHash) Hash64Salt64(buffer []byte, salt uint64) (uint64, error) {
+	newBuffer := make([]byte, len(buffer)+8)
+	binary.BigEndian.PutUint64(newBuffer, salt)
+	copy(newBuffer[8:], buffer)
+
+	return nh.hash(newBuffer)
+}
