@@ -8,6 +8,10 @@ type Pokecrypt struct{
   msSinceStart uint32
 }
 
+func New() *Pokecrypt {
+  return &Pokecrypt{}
+}
+
 // CreateIV returns a new IV from the cRand spec
 func (p *Pokecrypt) CreateIV() []byte {
   // Re-init struct
@@ -21,4 +25,8 @@ func (p *Pokecrypt) CreateIV() []byte {
 // Encrypt encrypts in with iv
 func (p *Pokecrypt) Encrypt(in []byte, iv []byte) ([]byte, error) {
   return fpm_encrypt(in, p.msSinceStart)
+}
+
+func (p *Pokecrypt) Enabled() bool {
+  return true
 }
