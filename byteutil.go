@@ -1,4 +1,4 @@
-package crypto
+package pokecrypt
 
 import (
 	"reflect"
